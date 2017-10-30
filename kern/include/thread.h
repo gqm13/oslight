@@ -39,7 +39,7 @@
 #include <array.h>
 #include <spinlock.h>
 #include <threadlist.h>
-
+#include <synch.h>
 struct cpu;
 
 /* get machine-dependent defs */
@@ -109,6 +109,12 @@ struct thread {
 	bool t_did_reserve_buffers;	/* reserve_buffers() in effect */
 
 	/* add more here as needed */
+	struct thread *t_parent;
+	bool complete;
+	int t_children;
+	struct lock *t_lock;
+	struct wchan *t_wchan;
+	struct cv *t_cv;
 };
 
 /*
@@ -146,6 +152,13 @@ void thread_shutdown(void);
 int thread_fork(const char *name, struct proc *proc,
                 void (*func)(void *, unsigned long),
                 void *data1, unsigned long data2);
+
+int thread_fork2(const char *name, struct proc *proc,
+		void(*func)(void *, unsigned long),
+		void *data1, unsigned long data2,
+		struct thread **thread_ret);
+
+int thread_join(struct thread *thread);
 
 /*
  * Cause the current thread to exit.

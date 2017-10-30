@@ -150,6 +150,12 @@ thread_create(const char *name)
 	thread->t_did_reserve_buffers = false;
 
 	/* If you add to struct thread, be sure to initialize here */
+	thread->complete = true; //child process is complete
+	thread->t_parent = NULL;	//pointer to parent thread
+	thread->t_children = 0;	//number of child threads
+	thread->t_lock = lock_create(thread->t_name);
+	thread->t_wchan = wchan_create(thread->t_name);
+	thread->t_cv = cv_create(thread->t_name);
 
 	return thread;
 }
@@ -285,7 +291,18 @@ thread_destroy(struct thread *thread)
 
 	/* sheer paranoia */
 	thread->t_wchan_name = "DESTROYED";
-
+	lock_destroy(thread->t_lock);
+	wchan_destroy(thread->t_wchan);
+	cv_destroy(thread->t_cv);
+	if(thread->t_parent != NULL)
+	{
+		thread->t_parent->children--;
+		if(thread->t_parent->children == 0)
+		{
+			thread->t_parent->complete = true;
+		}
+	}
+	kfree(thread->t_parent);
 	kfree(thread->t_name);
 	kfree(thread);
 }
@@ -549,6 +566,88 @@ thread_fork(const char *name,
 
 	return 0;
 }
+
+int thread_fork2(const char *name, struct proc *proc,
+                void(*func)(void *, unsigned long),
+                void *data1, unsigned long data2,
+		struct thread **thread_ret)
+{
+	struct thread *newthread;
+        int result;
+
+        newthread = thread_create(name);
+        if (newthread == NULL) {
+                return ENOMEM;
+        }
+
+        /* Allocate a stack */
+        newthread->t_stack = kmalloc(STACK_SIZE);
+        if (newthread->t_stack == NULL) {
+                thread_destroy(newthread);
+                return ENOMEM;
+        }
+        thread_checkstack_init(newthread);
+
+        /*
+         * Now we clone various fields from the parent thread.
+         */
+
+        /* Thread subsystem fields */
+        newthread->t_cpu = curthread->t_cpu;
+
+	//ASST1 additions
+	*thread_ret = newthread;
+	newthread->t_parent = curthread;
+	newthread->t_parent->complete = false;
+	newthread->t_parent->children++;
+        /* Attach the new thread to its process */
+        if (proc == NULL) {
+                proc = curthread->t_proc;
+        }
+        result = proc_addthread(proc, newthread);
+        if (result) {
+                /* thread_destroy will clean up the stack */
+		 thread_destroy(newthread);
+                return result;
+        }
+
+        /*
+         * Because new threads come out holding the cpu runqueue lock
+         * (see notes at bottom of thread_switch), we need to account
+         * for the spllower() that will be done releasing it.
+         */
+        newthread->t_iplhigh_count++;
+
+        /* Set up the switchframe so entrypoint() gets called */
+        switchframe_init(newthread, entrypoint, data1, data2);
+
+        /* Lock the current cpu's run queue and make the new thread runnable */
+        thread_make_runnable(newthread, false);
+
+        return 0;
+
+}
+
+int thread_join(struct thread *thread)
+{
+	if(!thread->complete)
+	{
+		acquire_lock(thread->t_lock);
+		while(!thread->complete)
+		{
+			wchan_sleep(&thread->t_cv, &thread->t_lock);
+		}
+		release_lock(thread->t_lock);
+	}
+	else if(thread->t_parent != NULL)
+	{
+		acquire_lock(thread->t_lock);
+		cv_signal(&thread->t_cv, &thread->t_lock);
+		release_lock(thread->t_lock);
+	}
+	return 0;
+}
+
 
 /*
  * High level, machine-independent context switch code.
